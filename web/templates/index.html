@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>朋友圈好友画像分析</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f5f6f8; margin: 0; padding: 24px; color: #222; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 24px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 24px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+  .drop { border: 2px dashed #c7c9d1; border-radius: 10px; padding: 40px; text-align: center; cursor: pointer; transition: .15s; }
+  .drop:hover, .drop.over { border-color: #4f6ef7; background: #f0f4ff; }
+  .drop .big { font-size: 40px; }
+  .drop p { margin: 8px 0 0; color: #666; font-size: 14px; }
+  input[type=file] { display: none; }
+  button, .btn { background: #4f6ef7; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; cursor: pointer; }
+  button:disabled { background: #aab; cursor: not-allowed; }
+  .btn-sec { background: #6b7280; }
+  .progress { height: 14px; background: #eef0f3; border-radius: 7px; overflow: hidden; margin: 16px 0 8px; }
+  .bar { height: 100%; background: linear-gradient(90deg,#4f6ef7,#7c9bff); width: 0%; transition: width .3s; }
+  .stat { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: #555; margin: 8px 0; }
+  .stat b { color: #222; }
+  .log { background: #1e1f24; color: #cdd6e6; font-family: Consolas, monospace; font-size: 12px; border-radius: 8px; padding: 12px; height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .err { color: #d33; }
+  .ok { color: #2a8; }
+  .hide { display: none; }
+  .muted { color: #999; font-size: 12px; }
+  a.dl { display: inline-block; background: #2a8; color:#fff; text-decoration:none; padding: 10px 20px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>朋友圈好友画像分析</h1>
+  <div class="sub">上传朋友圈截图压缩包（zip，文件命名 <code>昵称-1.png / 昵称-2.png …</code>），后端用 qwen3.7-plus 分析后生成 Excel 供下载。</div>
+
+  <div class="card">
+    <label class="drop" id="drop" for="file">
+      <div class="big">⬆️</div>
+      <p><b>点击选择</b> 或拖拽 zip 文件到此处</p>
+      <p class="muted">单文件上限 500MB</p>
+    </label>
+    <input type="file" id="file" accept=".zip">
+    <div id="uploadInfo" class="stat hide"></div>
+    <div style="margin-top:14px"><button id="uploadBtn" disabled>开始分析</button> <span id="fileName" class="muted"></span></div>
+  </div>
+
+  <div class="card hide" id="taskCard">
+    <div class="stat"><span>任务ID: <b id="taskId"></b></span> <span id="statusText"></span></div>
+    <div class="progress"><div class="bar" id="bar"></div></div>
+    <div class="stat">
+      <span>进度: <b id="prog"></b></span>
+      <span>成功: <b id="okCnt">0</b></span>
+      <span>失败: <b id="failCnt">0</b></span>
+      <span>耗时: <b id="elapsed">0s</b></span>
+    </div>
+    <div class="stat muted" id="current"></div>
+    <div class="log" id="log"></div>
+    <div style="margin-top:14px">
+      <a id="dl" class="dl hide" href="#">⬇️ 下载 Excel</a>
+      <button id="cancelBtn" class="btn-sec">取消</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentId = null, pollTimer = null;
+
+// 文件选择
+$('file').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) { $('fileName').textContent = f.name + ' (' + (f.size/1024/1024).toFixed(1) + 'MB)'; $('uploadBtn').disabled = false; }
+});
+// 拖拽
+const drop = $('drop');
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f && f.name.toLowerCase().endsWith('.zip')) {
+    $('file').files = e.dataTransfer.files;
+    $('fileName').textContent = f.name + ' (' + (f.size/1024/1024).toFixed(1) + 'MB)';
+    $('uploadBtn').disabled = false;
+  }
+});
+
+// 上传
+$('uploadBtn').addEventListener('click', async () => {
+  const f = $('file').files[0];
+  if (!f) return;
+  $('uploadBtn').disabled = true;
+  $('uploadInfo').classList.remove('hide');
+  $('uploadInfo').innerHTML = '上传中…';
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) { $('uploadInfo').innerHTML = '<span class="err">' + (j.error||'上传失败') + '</span>'; $('uploadBtn').disabled=false; return; }
+    $('uploadInfo').innerHTML = '已识别 <b>' + j.total + '</b> 位好友, 开始分析…';
+    startPolling(j.task_id);
+  } catch(e) { $('uploadInfo').innerHTML = '<span class="err">网络错误: ' + e + '</span>'; $('uploadBtn').disabled=false; }
+});
+
+// 从 URL 恢复任务 (?task=xxx)
+const urlId = new URLSearchParams(location.search).get('task');
+if (urlId) startPolling(urlId);
+
+function startPolling(taskId) {
+  currentId = taskId;
+  $('taskCard').classList.remove('hide');
+  $('taskId').textContent = taskId;
+  $('dl').classList.add('hide');           // 重置下载按钮(新任务未完成前不可点)
+  $('dl').removeAttribute('href');
+  $('cancelBtn').disabled = false;
+  history.replaceState(null,'', '?task=' + taskId);
+  pollOnce();
+  pollTimer = setInterval(pollOnce, 3000);
+}
+
+async function pollOnce() {
+  if (!currentId) return;
+  try {
+    const r = await fetch('/progress/' + currentId);
+    const j = await r.json();
+    if (!r.ok) { $('log').textContent = j.error||'任务不存在'; return; }
+    render(j);
+    if (j.finished) { clearInterval(pollTimer); pollTimer=null; }
+  } catch(e) {}
+}
+
+function render(j) {
+  const total = j.total||0, done = j.done||0, fail = j.fail||0;
+  const pct = total ? Math.round((done+fail)/total*100) : 0;
+  $('bar').style.width = pct + '%';
+  $('prog').textContent = (done+fail) + '/' + total + (j.skipped? ' (跳过'+j.skipped+')':'');
+  $('okCnt').textContent = done;
+  $('failCnt').textContent = fail;
+  $('elapsed').textContent = Math.round(j.elapsed||0) + 's';
+  $('current').textContent = j.current ? '当前: ' + j.current : '';
+  $('log').innerHTML = (j.log||[]).join('\n');
+  $('log').scrollTop = $('log').scrollHeight;
+  const st = $('statusText');
+  const dl = $('dl');
+  if (j.status==='pending') { st.innerHTML = '<span class="muted">⏳ 排队中…</span>'; }
+  else if (j.status==='running') { st.innerHTML = '<span class="ok">⚙️ 分析中…</span>'; }
+  else if (j.status==='done') { st.innerHTML = '<span class="ok">✅ '+j.message+'</span>'; }
+  else if (j.status==='failed') { st.innerHTML = '<span class="err">❌ '+j.message+'</span>'; }
+  // 下载按钮: 仅完成且Excel已生成时才显示可点, 其余一律隐藏禁用
+  if (j.has_xlsx) {
+    dl.classList.remove('hide');
+    dl.href = '/download/' + currentId;
+  } else {
+    dl.classList.add('hide');
+    dl.removeAttribute('href');
+  }
+}
+
+$('cancelBtn').addEventListener('click', async () => {
+  if (!currentId) return;
+  if (!confirm('确认取消当前任务？')) return;
+  await fetch('/cancel/'+currentId, {method:'POST'});
+  $('cancelBtn').disabled = true;
+});
+</script>
+</body>
+</html>

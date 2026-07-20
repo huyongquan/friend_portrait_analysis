@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时生成的结果与任务数据(含隐私, 不入库)
+web/tasks/
+*.xlsx
+.portrait_progress.json
+
+# 测试/临时文件
+test_shots.zip
+download_test.xlsx
+*.log
+.DS_Store
