@@ -159,11 +159,30 @@ def extract_json_object(text):
     return json.loads(text)
 
 
+def dedup_seqs(seqs):
+    """同一好友多张截图若内容相同(字节md5一致), 只保留1张。
+    seqs: {seq: path}。返回去重后的 {seq: path}(按seq升序, 内容相同的只留最小seq)。
+    截图工具对空朋友圈/同一页截出的png字节级一致, md5判定快且零误判。"""
+    import hashlib
+    seen, out = {}, {}
+    for seq in sorted(seqs.keys()):
+        p = seqs[seq]
+        try:
+            h = hashlib.md5(Path(p).read_bytes()).hexdigest()
+        except Exception:
+            h = str(seq)  # 读不出就当作唯一, 不去重
+        if h not in seen:
+            seen[h] = seq
+            out[seq] = p
+    return out
+
+
 def analyze_one(name, seqs):
     """分析一位好友。返回结果 dict(含 微信昵称)。"""
     t0 = time.time()
-    # 按 seq 升序取图(全部), 3张或4张目录都支持
-    ordered = [seqs[k] for k in sorted(seqs.keys())]
+    # 先去重(内容相同的截图只留1张), 再按 seq 升序取图
+    uniq = dedup_seqs(seqs)
+    ordered = [uniq[k] for k in sorted(uniq.keys())]
     content = []
     for p in ordered:
         try:
