@@ -29,7 +29,14 @@
   .hide { display: none; }
   .muted { color: #999; font-size: 12px; }
   a.dl { display: inline-block; background: #2a8; color:#fff; text-decoration:none; padding: 10px 20px; border-radius: 8px; }
+  /* SVG 图标(不依赖 emoji 字体) */
+  .ico { width: 1em; height: 1em; vertical-align: -0.125em; fill: currentColor; }
+  .ico-big { width: 40px; height: 40px; fill: #4f6ef7; }
+  .st-ok { color: #2a8; }
+  .st-err { color: #d33; }
+  .st-mute { color: #999; }
 </style>
+
 </head>
 <body>
 <div class="wrap">
@@ -38,9 +45,9 @@
 
   <div class="card">
     <label class="drop" id="drop" for="file">
-      <div class="big">⬆️</div>
+      <svg class="ico-big" viewBox="0 0 24 24"><path d="M12 3l7 7h-4v7h-6v-7H5l7-7z"/></svg>
       <p><b>点击选择</b> 或拖拽 zip 文件到此处</p>
-      <p class="muted">单文件上限 500MB</p>
+      <p class="muted">单文件上限 2GB</p>
     </label>
     <input type="file" id="file" accept=".zip">
     <div id="uploadInfo" class="stat hide"></div>
@@ -59,7 +66,7 @@
     <div class="stat muted" id="current"></div>
     <div class="log" id="log"></div>
     <div style="margin-top:14px">
-      <a id="dl" class="dl hide" href="#">⬇️ 下载 Excel</a>
+      <a id="dl" class="dl hide" href="#"><svg class="ico" viewBox="0 0 24 24"><path d="M12 16l-7-7h4V2h6v7h4l-7 7zM5 18h14v2H5v-2z"/></svg> 下载 Excel</a>
       <button id="cancelBtn" class="btn-sec">取消</button>
     </div>
   </div>
@@ -145,10 +152,10 @@ function render(j) {
   $('log').scrollTop = $('log').scrollHeight;
   const st = $('statusText');
   const dl = $('dl');
-  if (j.status==='pending') { st.innerHTML = '<span class="muted">⏳ 排队中…</span>'; }
-  else if (j.status==='running') { st.innerHTML = '<span class="ok">⚙️ 分析中…</span>'; }
-  else if (j.status==='done') { st.innerHTML = '<span class="ok">✅ '+j.message+'</span>'; }
-  else if (j.status==='failed') { st.innerHTML = '<span class="err">❌ '+j.message+'</span>'; }
+  if (j.status==='pending') { st.innerHTML = '<span class="st-mute">● 排队中…</span>'; }
+  else if (j.status==='running') { st.innerHTML = '<span class="st-ok">● 分析中…</span>'; }
+  else if (j.status==='done') { st.innerHTML = '<span class="st-ok">● '+j.message+'</span>'; }
+  else if (j.status==='failed') { st.innerHTML = '<span class="st-err">● '+j.message+'</span>'; }
   // 下载按钮: 仅完成且Excel已生成时才显示可点, 其余一律隐藏禁用
   if (j.has_xlsx) {
     dl.classList.remove('hide');

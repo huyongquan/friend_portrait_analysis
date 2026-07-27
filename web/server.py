@@ -23,7 +23,7 @@ TASK_ROOT = HERE / "tasks"
 TEMPLATE_DIR = HERE / "templates"
 
 MAX_CONCURRENT_TASKS = 2     # 同时最多几个分析任务在跑, 其余排队
-MAX_UPLOAD_BYTES = 500 * 1024 * 1024   # 单次上传上限 500MB
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024   # 单次上传上限 2GB
 TASK_TTL_HOURS = 24          # 完成后保留时长, 超时清理
 EXCEL_NAME = "好友画像分析.xlsx"
 
