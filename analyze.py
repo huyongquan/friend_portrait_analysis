@@ -14,6 +14,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import requests
 
+def _ts():
+    """日志时间戳前缀, 格式 [MM-DD HH:MM:SS]。"""
+    return time.strftime("[%m-%d %H:%M:%S]")
+
 # ========== 配置 ==========
 API_KEY = "sk-sp-D.IYLYL.ZTMq.MEYCIQCuCCbG86UQvZAnbsSfI4ZjLwmYoIChQ14/ZmXuFDvnLAIhAImtBvJUPmH1jeEmMQ7M0EkGz143KxepRblI0LbeiCRD"
 BASE_URL = "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic"
@@ -343,7 +347,7 @@ def run_analysis(shot_dir, out_xlsx, out_json, on_progress=None,
             if cancel_check and cancel_check():
                 for f in futs:
                     f.cancel()
-                print("⚠️ 任务已取消")
+                print(f"{_ts()} ⚠️ 任务已取消")
                 break
             try:
                 res = fut.result()
@@ -354,7 +358,7 @@ def run_analysis(shot_dir, out_xlsx, out_json, on_progress=None,
             elapsed = time.time() - t_start
             if res.get("error"):
                 fail_count += 1
-                print(f"[失败] {res['微信昵称']}: {res['error']}")
+                print(f"{_ts()} [失败] {res['微信昵称']}: {res['error']}")
                 if on_progress:
                     on_progress("fail", {"name": res["微信昵称"], "error": res["error"],
                                          "done": done_count, "fail": fail_count,
@@ -364,13 +368,13 @@ def run_analysis(shot_dir, out_xlsx, out_json, on_progress=None,
                 dur = res.get("_耗时秒", 0)
                 job = res.get("职业或行业", "")
                 tags = "、".join(res.get("综合画像标签", []) or [])
-                print(f"[OK {done_count}/{len(todo)}] {res['微信昵称']}  职业={job}  标签={tags}  ({dur}s)")
+                print(f"{_ts()} [OK {done_count}/{len(todo)}] {res['微信昵称']}  职业={job}  标签={tags}  ({dur}s)")
                 if on_progress:
                     on_progress("ok", {"name": res["微信昵称"], "job": job, "tags": tags,
                                         "dur": dur, "done": done_count, "fail": fail_count,
                                         "total": len(todo), "elapsed": elapsed})
 
-    print(f"\n本轮完成: 成功 {done_count}, 失败 {fail_count}")
+    print(f"\n{_ts()} 本轮完成: 成功 {done_count}, 失败 {fail_count}")
     if not no_xlsx:
         finish(done_map, out_xlsx=out_xlsx, out_json=out_json)
     if on_progress:

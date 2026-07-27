@@ -118,6 +118,8 @@ def public_view(t):
 
 
 def append_log(t, line):
+    # 自动加时间戳前缀 [MM-DD HH:MM:SS]
+    line = f"[{time.strftime('%m-%d %H:%M:%S')}] {line}"
     t["log"].append(line)
     if len(t["log"]) > 50:
         t["log"] = t["log"][-50:]
