@@ -350,7 +350,9 @@ if __name__ == "__main__":
     if args.prod:
         from waitress import serve
         print(f"生产模式启动: http://0.0.0.0:{args.port}")
-        serve(app, host="0.0.0.0", port=args.port, threads=8)
+        # waitress 默认 max_request_body_size=1GB, 超过返回413; 按配置上限放开
+        serve(app, host="0.0.0.0", port=args.port, threads=8,
+              max_request_body_size=MAX_UPLOAD_BYTES)
     else:
         print(f"开发模式启动: http://127.0.0.1:{args.port}")
         app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)
