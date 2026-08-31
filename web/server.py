@@ -9,6 +9,7 @@
 """
 import os, sys, json, uuid, time, threading, zipfile, shutil, argparse, tempfile
 from pathlib import Path
+import requests
 
 # 把项目根目录加入 sys.path, 以便 import analyze
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +28,24 @@ MAX_CONCURRENT_TASKS = 2     # 同时最多几个分析任务在跑, 其余排�
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024   # 单次上传上限 2GB
 TASK_TTL_HOURS = 24          # 完成后保留时长, 超时清理
 EXCEL_NAME = "好友画像分析.xlsx"
+
+# /analyze_one 返回字段: 中文(模型输出) -> 英文(API 对外)
+ANALYZE_ONE_FIELD_MAP = {
+    "性别": "gender",
+    "年龄段": "age_range",
+    "职业或行业": "occupation",
+    "兴趣标签": "interests",
+    "生活状态": "life_status",
+    "活跃度": "activity_level",
+    "朋友圈内容摘要": "moments_summary",
+    "潜在业务价值": "business_value",
+    "综合画像标签": "tags",
+}
+
+# OSS URL 域名白名单(逗号分隔, 可经环境变量 OSS_DOMAIN_WHITELIST 覆盖)
+_default_oss = "https://avatar-video.oss-cn-shenzhen.aliyuncs.com/"
+OSS_DOMAIN_WHITELIST = [d.strip() for d in os.environ.get("OSS_DOMAIN_WHITELIST", _default_oss).split(",") if d.strip()]
+MAX_IMAGE_BYTES = 20 * 1024 * 1024   # 单张截图上限 20MB
 
 # API key 优先环境变量, 缺省回退 analyze.py 硬编码(开发期)
 if os.environ.get("ANALYZE_API_KEY"):
@@ -425,62 +444,85 @@ def analyze_one_route():
     """单好友画像分析
     ---
     tags: [单好友分析]
-    summary: 输入文字介绍和/或截图, 返回单好友画像 JSON
+    summary: 输入文字介绍和/或 OSS 截图 URL, 返回单好友画像 JSON
     description: |
-      非批量接口。输入一段文字介绍 + 若多张截图(朋友圈截图、与客户的聊天对话截图均可), 直接返回画像字段。
-      **intro 与 images 不能同时为空**, 否则返回 400。
+      非批量接口。两种入参方式:
+      - JSON body: `{"intro": "...", "oss_urls": ["url1", "url2"]}` (Content-Type: application/json)
+      - multipart form: intro 字段 + 重复的 oss_urls 字段
+
+      截图 URL 必须命中 OSS 域名白名单(默认 `avatar-video.oss-cn-shenzhen.aliyuncs.com`,
+      可经环境变量 OSS_DOMAIN_WHITELIST 逗号分隔覆盖), 单张上限 20MB。
+      **intro 与 oss_urls 不能同时为空**, 否则返回 400。
       图片临时落盘、请求结束后清理。耗时约 20-40 秒。
-    consumes: [multipart/form-data]
+    consumes: [application/json]
     parameters:
-      - name: intro
-        in: formData
-        type: string
-        description: 用户对该客户的文字介绍(可选)
-        required: false
-      - name: images
-        in: formData
-        type: file
-        description: 截图文件, 可传多张(同名字段重复; 朋友圈/对话截图均可, 可选)
-        required: false
-    responses:
-      200:
-        description: 画像分析结果(不含微信昵称)
+      - name: body
+        in: body
+        required: true
         schema:
           type: object
           properties:
-            性别: {type: string, example: "女", enum: [男, 女, 不确定]}
-            年龄段: {type: string, example: "25-35"}
-            "职业或行业": {type: string, example: "国际物流/货代"}
-            "兴趣标签": {type: array, items: {type: string}, example: ["旅游", "社交", "摄影"]}
-            "生活状态": {type: string, example: "创业者"}
-            "活跃度": {type: string, example: "中,近期更新较多"}
-            "朋友圈内容摘要": {type: string, example: "主要发布业务广告及旅游聚会照片"}
-            "潜在业务价值": {type: string, example: "创业者有企业财产险/重疾/理财需求"}
-            "综合画像标签": {type: array, items: {type: string}, example: ["事业心强", "精致生活", "商务型"]}
+            intro: {type: string, description: "用户对该客户的文字介绍(可选)"}
+            oss_urls:
+              type: array
+              items: {type: string, format: uri}
+              description: "截图 OSS URL 列表(可选; 朋友圈/对话截图均可)"
+    responses:
+      200:
+        description: 画像分析结果(英文字段)
+        schema:
+          type: object
+          properties:
+            gender: {type: string, example: "女", enum: [男, 女, 不确定]}
+            age_range: {type: string, example: "25-35"}
+            occupation: {type: string, example: "国际物流/货代"}
+            interests: {type: array, items: {type: string}, example: ["旅游", "社交", "摄影"]}
+            life_status: {type: string, example: "创业者"}
+            activity_level: {type: string, example: "中,近期更新较多"}
+            moments_summary: {type: string, example: "主要发布业务广告及旅游聚会照片"}
+            business_value: {type: string, example: "创业者有企业财产险/重疾/理财需求"}
+            tags: {type: array, items: {type: string}, example: ["事业心强", "精致生活", "商务型"]}
       400:
-        description: 文本和图片同时为空
-        schema: {type: object, properties: {error: {type: string, example: "文本介绍和图片不能同时为空"}}}
+        description: 入参不合法(intro 和 oss_urls 同时为空 / 域名不合法 / 下载失败 / 超过 20MB)
+        schema: {type: object, properties: {error: {type: string, example: "intro 和 oss_urls 不能同时为空"}}}
       500:
         description: 模型内容审核拒绝或分析异常
         schema: {type: object, properties: {error: {type: string}}}
     """
-    intro = request.form.get("intro", "").strip()
-    files = request.files.getlist("images")
+    # 入参兼容 JSON body 与 multipart form
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        intro = (data.get("intro") or "").strip()
+        oss_urls = data.get("oss_urls") or []
+        if not isinstance(oss_urls, list):
+            return jsonify({"error": "oss_urls 必须是字符串数组"}), 400
+    else:
+        intro = request.form.get("intro", "").strip()
+        oss_urls = request.form.getlist("oss_urls")
+    oss_urls = [u.strip() for u in oss_urls if isinstance(u, str) and u.strip()]
+
+    if not intro and not oss_urls:
+        return jsonify({"error": "intro 和 oss_urls 不能同时为空"}), 400
 
     tmp_dir = None
     image_paths = []
     try:
-        valid = [f for f in files if f and f.filename]
-        if valid:
+        if oss_urls:
             tmp_dir = Path(tempfile.mkdtemp(prefix="analyze_one_"))
-            for i, f in enumerate(valid):
-                ext = Path(f.filename).suffix.lower() or ".png"
-                p = tmp_dir / f"img_{i:03d}{ext}"
-                f.save(p)
+            for i, url in enumerate(oss_urls):
+                if not any(url.startswith(p) for p in OSS_DOMAIN_WHITELIST):
+                    return jsonify({"error": f"oss_url 域名不合法: {url}"}), 400
+                try:
+                    resp = requests.get(url, timeout=(10, 120), stream=True)
+                    resp.raise_for_status()
+                    content = resp.content
+                except Exception as e:
+                    return jsonify({"error": f"下载失败 {url}: {e}"}), 400
+                if len(content) > MAX_IMAGE_BYTES:
+                    return jsonify({"error": f"图片超过 {MAX_IMAGE_BYTES//1024//1024}MB 上限: {url}"}), 400
+                p = tmp_dir / f"img_{i:03d}.jpg"
+                p.write_bytes(content)
                 image_paths.append(str(p))
-
-        if not intro and not image_paths:
-            return jsonify({"error": "文本介绍和图片不能同时为空"}), 400
 
         try:
             result = analyze.analyze_single(intro, image_paths)
@@ -488,7 +530,9 @@ def analyze_one_route():
             return jsonify({"error": str(e)[:300]}), 500
         except Exception as e:
             return jsonify({"error": f"分析失败: {e}"}), 500
-        return jsonify(result)
+        # 模型输出的中文 key 统一转英文, 仅保留映射内的字段
+        out = {en: result.get(cn) for cn, en in ANALYZE_ONE_FIELD_MAP.items()}
+        return jsonify(out)
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
