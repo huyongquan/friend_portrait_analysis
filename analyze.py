@@ -60,6 +60,29 @@ PROMPT = """下面是某微信好友个人主页的 3 张朋友圈截图(依次�
 }
 注意: 读不清的字段填"未知"或空数组,不要编造。"""
 
+# 单好友分析 prompt: 输入可能是 朋友圈截图 + 对话截图 + 文字介绍, 数量任意
+SINGLE_PROMPT = """下面是某微信好友的相关资料,请基于这些资料对该好友做用户画像分析。
+
+资料形式:
+- 用户提供的文字介绍(若有, 见上方"用户介绍")
+- 若干张截图(可能是朋友圈截图, 也可能是与该好友的聊天对话截图), 依次在上方给出
+
+请仔细阅读图片中的内容(朋友圈文案/配图/发布时间/可见互动, 或聊天对话内容), 结合文字介绍综合判断。
+
+只输出一个 JSON 对象,不要任何解释、不要 markdown 包裹。字段如下:
+{
+  "性别": "男/女/不确定",
+  "年龄段": "如 18-25 / 25-35 / 35-45 / 45-55 / 未知",
+  "职业或行业": "如 保险代理人/宝妈/教师/个体经营/上班族/未知,尽量具体",
+  "兴趣标签": ["从资料归纳的兴趣,如 旅游/美食/亲子/健身/摄影/理财/养生,3-6个"],
+  "生活状态": "如 已婚有娃/单身/创业者/退休/求学中",
+  "活跃度": "高/中/低,后接简短依据,如 '中,近期更新较少'",
+  "朋友圈内容摘要": "最近几条朋友圈主题或聊天话题概括,30-60字",
+  "潜在业务价值": "保险场景线索,如 家庭责任重/关注健康/有理财需求/为孩子规划/无明显线索",
+  "综合画像标签": ["3-5个性格或画像标签,如 自律/爱晒娃/商务型/顾家/精致生活"]
+}
+注意: 资料不足的字段填"未知"或空数组,不要编造。"""
+
 
 # ========== 图片处理 ==========
 def compress_to_b64(img_path):
@@ -204,6 +227,26 @@ def analyze_one(name, seqs):
     obj["微信昵称"] = name
     obj["_耗时秒"] = round(time.time() - t0, 1)
     return obj
+
+
+def analyze_single(intro, image_paths):
+    """分析单一位好友(无微信昵称字段)。
+    intro: 文本介绍(可空串); image_paths: 图片路径列表(可空)。
+    文本和图片不能同时为空(由调用方校验, 这里不重复校验)。
+    返回 dict, 字段为 COLUMNS 去掉 微信昵称。"""
+    content = []
+    for p in image_paths:
+        b64 = compress_to_b64(p)
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+    intro_block = f"用户介绍:\n{intro}\n\n" if intro else "(无用户介绍)\n\n"
+    content.append({"type": "text", "text": intro_block + SINGLE_PROMPT})
+    payload = {"model": MODEL, "max_tokens": MAX_TOKENS,
+               "messages": [{"role": "user", "content": content}]}
+    text = _qwen_post_text(payload)
+    return extract_json_object(text)
 
 
 # ========== 增量保存 ==========

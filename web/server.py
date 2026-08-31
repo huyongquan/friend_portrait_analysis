@@ -7,7 +7,7 @@
     py -3.12 web/server.py            # 开发 (Flask dev server, localhost:8000)
     py -3.12 web/server.py --prod     # 生产 (waitress, 0.0.0.0:8000, 公网部署用)
 """
-import os, sys, json, uuid, time, threading, zipfile, shutil, argparse
+import os, sys, json, uuid, time, threading, zipfile, shutil, argparse, tempfile
 from pathlib import Path
 
 # 把项目根目录加入 sys.path, 以便 import analyze
@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 import analyze  # 复用 analyze.py 的 group_friends/analyze_one/run_analysis 等
 
 from flask import Flask, request, jsonify, send_file, render_template, abort
+from flasgger import Swagger
 
 # ========== 配置 ==========
 HERE = Path(__file__).resolve().parent
@@ -34,6 +35,22 @@ if os.environ.get("ANALYZE_API_KEY"):
 TASK_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, template_folder=str(TEMPLATE_DIR))
+
+# Swagger UI: /apidocs  (访问 /docs 自动跳转)
+Swagger(app, template={
+    "info": {
+        "title": "朋友圈好友画像分析 API",
+        "version": "1.0",
+        "description": "上传朋友圈截图 zip 批量生成好友画像 Excel, 或单好友 /analyze_one 直接返回画像 JSON。",
+    },
+    "consumes": ["multipart/form-data"],
+    "produces": ["application/json"],
+})
+
+@app.route("/docs")
+def _docs_redirect():
+    from flask import redirect
+    return redirect("/apidocs")
 
 # ========== 任务状态 ==========
 _TASKS_LOCK = threading.Lock()
@@ -185,11 +202,53 @@ def run_task(task_id, shot_dir, out_xlsx, out_json):
 # ========== 路由 ==========
 @app.route("/")
 def index():
+    """前端页面
+    ---
+    tags: [页面]
+    summary: 上传与分析前端页面
+    description: 返回上传 zip、轮询进度、下载 Excel 的单页应用。
+    responses:
+      200:
+        description: HTML 页面
+        schema: {type: string}
+    """
     return render_template("index.html")
 
 
 @app.route("/upload", methods=["POST"])
 def upload():
+    """批量上传分析
+    ---
+    tags: [批量分析]
+    summary: 上传朋友圈截图 zip, 后台异步分析
+    description: |
+      上传 zip(文件命名 `<微信昵称>-N.png`), 秒回任务 ID; 后台 8 路并发分析, 最多 2 个任务同时运行, 其余排队。
+      用 GET /progress/{task_id} 轮询, GET /download/{task_id} 下载 Excel。
+    consumes: [multipart/form-data]
+    parameters:
+      - name: file
+        in: formData
+        type: file
+        description: zip 压缩包(单文件上限 2GB)
+        required: true
+    responses:
+      200:
+        description: 任务已接受
+        schema:
+          type: object
+          properties:
+            task_id: {type: string, example: "a1b2c3d4e5f6"}
+            total: {type: integer, example: 142}
+      400:
+        description: 无文件 / 非 zip / 命名不符合 / 未识别好友
+        schema: {type: object, properties: {error: {type: string}}}
+      413:
+        description: 超过 2GB 上限
+        schema: {type: object, properties: {error: {type: string}}}
+      500:
+        description: 保存/解压失败
+        schema: {type: object, properties: {error: {type: string}}}
+    """
     if "file" not in request.files:
         return jsonify({"error": "未收到文件"}), 400
     f = request.files["file"]
@@ -263,6 +322,39 @@ def upload():
 
 @app.route("/progress/<task_id>")
 def progress(task_id):
+    """查询任务进度
+    ---
+    tags: [批量分析]
+    summary: 轮询任务状态
+    description: 返回任务当前进度、成功/失败计数、最近日志等; status 为 done/failed 时表示终态。
+    parameters:
+      - name: task_id
+        in: path
+        type: string
+        required: true
+        description: /upload 返回的 task_id
+    responses:
+      200:
+        description: 任务状态
+        schema:
+          type: object
+          properties:
+            id: {type: string}
+            status: {type: string, enum: [pending, running, done, failed]}
+            total: {type: integer}
+            done: {type: integer}
+            fail: {type: integer}
+            skipped: {type: integer}
+            current: {type: string, description: 当前正在分析的好友 + 职业}
+            elapsed: {type: number, description: 已耗时秒}
+            message: {type: string}
+            log: {type: array, items: {type: string}}
+            finished: {type: boolean}
+            has_xlsx: {type: boolean}
+      404:
+        description: 任务不存在或已过期
+        schema: {type: object, properties: {error: {type: string}}}
+    """
     with _TASKS_LOCK:
         t = TASKS.get(task_id)
     if not t:
@@ -272,6 +364,24 @@ def progress(task_id):
 
 @app.route("/download/<task_id>")
 def download(task_id):
+    """下载结果 Excel
+    ---
+    tags: [批量分析]
+    summary: 下载生成的 Excel
+    description: 任务 status=done 且 Excel 已生成时可下载。
+    parameters:
+      - name: task_id
+        in: path
+        type: string
+        required: true
+    responses:
+      200:
+        description: Excel 文件
+        schema: {type: file}
+      404:
+        description: 任务不存在或 Excel 未就绪
+        schema: {type: object, properties: {error: {type: string}}}
+    """
     with _TASKS_LOCK:
         t = TASKS.get(task_id)
     if not t:
@@ -284,12 +394,104 @@ def download(task_id):
 
 @app.route("/cancel/<task_id>", methods=["POST"])
 def cancel(task_id):
+    """取消任务
+    ---
+    tags: [批量分析]
+    summary: 请求取消正在进行的任务
+    description: 设置取消标志, 等当前好友处理完后停止后续。已完成的任务无法取消。
+    parameters:
+      - name: task_id
+        in: path
+        type: string
+        required: true
+    responses:
+      200:
+        description: 已请求取消
+        schema: {type: object, properties: {ok: {type: boolean}, message: {type: string}}}
+      404:
+        description: 任务不存在
+        schema: {type: object, properties: {error: {type: string}}}
+    """
     with _TASKS_LOCK:
         t = TASKS.get(task_id)
     if not t:
         return jsonify({"error": "任务不存在"}), 404
     t["cancel"] = True
     return jsonify({"ok": True, "message": "已请求取消, 正在等待当前好友处理完"})
+
+
+@app.route("/analyze_one", methods=["POST"])
+def analyze_one_route():
+    """单好友画像分析
+    ---
+    tags: [单好友分析]
+    summary: 输入文字介绍和/或截图, 返回单好友画像 JSON
+    description: |
+      非批量接口。输入一段文字介绍 + 若多张截图(朋友圈截图、与客户的聊天对话截图均可), 直接返回画像字段。
+      **intro 与 images 不能同时为空**, 否则返回 400。
+      图片临时落盘、请求结束后清理。耗时约 20-40 秒。
+    consumes: [multipart/form-data]
+    parameters:
+      - name: intro
+        in: formData
+        type: string
+        description: 用户对该客户的文字介绍(可选)
+        required: false
+      - name: images
+        in: formData
+        type: file
+        description: 截图文件, 可传多张(同名字段重复; 朋友圈/对话截图均可, 可选)
+        required: false
+    responses:
+      200:
+        description: 画像分析结果(不含微信昵称)
+        schema:
+          type: object
+          properties:
+            性别: {type: string, example: "女", enum: [男, 女, 不确定]}
+            年龄段: {type: string, example: "25-35"}
+            "职业或行业": {type: string, example: "国际物流/货代"}
+            "兴趣标签": {type: array, items: {type: string}, example: ["旅游", "社交", "摄影"]}
+            "生活状态": {type: string, example: "创业者"}
+            "活跃度": {type: string, example: "中,近期更新较多"}
+            "朋友圈内容摘要": {type: string, example: "主要发布业务广告及旅游聚会照片"}
+            "潜在业务价值": {type: string, example: "创业者有企业财产险/重疾/理财需求"}
+            "综合画像标签": {type: array, items: {type: string}, example: ["事业心强", "精致生活", "商务型"]}
+      400:
+        description: 文本和图片同时为空
+        schema: {type: object, properties: {error: {type: string, example: "文本介绍和图片不能同时为空"}}}
+      500:
+        description: 模型内容审核拒绝或分析异常
+        schema: {type: object, properties: {error: {type: string}}}
+    """
+    intro = request.form.get("intro", "").strip()
+    files = request.files.getlist("images")
+
+    tmp_dir = None
+    image_paths = []
+    try:
+        valid = [f for f in files if f and f.filename]
+        if valid:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="analyze_one_"))
+            for i, f in enumerate(valid):
+                ext = Path(f.filename).suffix.lower() or ".png"
+                p = tmp_dir / f"img_{i:03d}{ext}"
+                f.save(p)
+                image_paths.append(str(p))
+
+        if not intro and not image_paths:
+            return jsonify({"error": "文本介绍和图片不能同时为空"}), 400
+
+        try:
+            result = analyze.analyze_single(intro, image_paths)
+        except RuntimeError as e:
+            return jsonify({"error": str(e)[:300]}), 500
+        except Exception as e:
+            return jsonify({"error": f"分析失败: {e}"}), 500
+        return jsonify(result)
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ========== 辅助 ==========
