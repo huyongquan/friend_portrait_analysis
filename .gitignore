@@ -15,3 +15,8 @@ test_shots.zip
 download_test.xlsx
 *.log
 .DS_Store
+
+# 编辑器临时文件
+*.swp
+*.swo
+*~
