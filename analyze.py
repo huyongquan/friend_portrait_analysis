@@ -83,6 +83,24 @@ SINGLE_PROMPT = """下面是某微信好友的相关资料,请基于这些资料
 }
 注意: 资料不足的字段填"未知"或空数组,不要编造。"""
 
+# 更新画像 prompt: 输入现有画像(英文 key) + 对话记录, 输出更新后画像(同英文 key)
+UPDATE_PROMPT = """下面是某微信好友的现有用户画像(JSON), 以及用户与助手的一段对话记录。
+对话中用户可能会提到该好友的新情况(如新职业、新兴趣、生活状态变化、家庭变化等), 请据此更新画像。
+
+只输出更新后的 JSON 对象,不要任何解释、不要 markdown 包裹。
+
+规则:
+- 对话中没有提及的字段, 保持原值不变
+- 对话中明确出现的新信息, 更新对应字段
+- 不要编造, 模糊或读不清的保持原值
+- 输出字段名与"现有画像"完全一致(英文 key), 不要换成中文
+
+现有画像:
+{portrait_json}
+
+对话记录:
+{conversation}"""
+
 
 # ========== 图片处理 ==========
 def compress_to_b64(img_path):
@@ -245,6 +263,30 @@ def analyze_single(intro, image_paths):
     content.append({"type": "text", "text": intro_block + SINGLE_PROMPT})
     payload = {"model": MODEL, "max_tokens": MAX_TOKENS,
                "messages": [{"role": "user", "content": content}]}
+    text = _qwen_post_text(payload)
+    return extract_json_object(text)
+
+
+def update_portrait(portrait, messages):
+    """根据对话记录更新现有画像。
+    portrait: 现有画像 dict(英文字段, 与 /analyze_one 输出一致)
+    messages: 对话列表 [{role, content}, ...] 或纯文本字符串
+    返回更新后的 dict(英文字段, 与输入同结构)。"""
+    if isinstance(messages, str):
+        conv_text = messages.strip()
+    else:
+        parts = []
+        for m in (messages or []):
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            parts.append(f"{role}: {content}")
+        conv_text = "\n".join(parts)
+    portrait_json = json.dumps(portrait, ensure_ascii=False, indent=2)
+    prompt = UPDATE_PROMPT.replace("{portrait_json}", portrait_json).replace("{conversation}", conv_text)
+    payload = {"model": MODEL, "max_tokens": MAX_TOKENS,
+               "messages": [{"role": "user", "content": prompt}]}
     text = _qwen_post_text(payload)
     return extract_json_object(text)
 

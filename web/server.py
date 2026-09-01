@@ -538,6 +538,92 @@ def analyze_one_route():
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+@app.route("/update_portrait", methods=["POST"])
+def update_portrait_route():
+    """根据对话更新客户画像
+    ---
+    tags: [单好友分析]
+    summary: 输入现有画像 + 对话记录, 输出更新后的画像
+    description: |
+      用户与大模型的对话中可能提到客户新情况(新职业/新兴趣/生活状态变化/家庭变化等),
+      本接口据此更新现有画像。对话未提及的字段保持原值。
+      **portrait 与 messages 均必填**, 任一为空返回 400。
+    consumes: [application/json]
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required: [portrait, messages]
+          properties:
+            portrait:
+              type: object
+              description: 现有画像(/analyze_one 的输出, 英文字段)
+              properties:
+                gender: {type: string}
+                age_range: {type: string}
+                occupation: {type: string}
+                interests: {type: array, items: {type: string}}
+                life_status: {type: string}
+                activity_level: {type: string}
+                moments_summary: {type: string}
+                business_value: {type: string}
+                tags: {type: array, items: {type: string}}
+            messages:
+              type: array
+              description: 对话记录, 按时间顺序
+              items:
+                type: object
+                properties:
+                  role: {type: string, enum: [user, assistant], example: "user"}
+                  content: {type: string, example: "Cici最近生了宝宝"}
+    responses:
+      200:
+        description: 更新后的画像(英文字段, 同 portrait 结构)
+        schema:
+          type: object
+          properties:
+            gender: {type: string}
+            age_range: {type: string}
+            occupation: {type: string}
+            interests: {type: array, items: {type: string}}
+            life_status: {type: string}
+            activity_level: {type: string}
+            moments_summary: {type: string}
+            business_value: {type: string}
+            tags: {type: array, items: {type: string}}
+      400:
+        description: portrait 为空 / messages 为空 / 类型不对
+        schema: {type: object, properties: {error: {type: string}}}
+      500:
+        description: 模型内容审核拒绝或分析异常
+        schema: {type: object, properties: {error: {type: string}}}
+    """
+    data = request.get_json(silent=True) or {}
+    portrait = data.get("portrait")
+    messages = data.get("messages")
+
+    if not isinstance(portrait, dict) or not portrait:
+        return jsonify({"error": "portrait 必须是非空对象"}), 400
+    if isinstance(messages, str):
+        if not messages.strip():
+            return jsonify({"error": "messages 不能为空"}), 400
+    elif isinstance(messages, list):
+        if not any(isinstance(m, dict) and str(m.get("content", "")).strip() for m in messages):
+            return jsonify({"error": "messages 不能为空"}), 400
+    else:
+        return jsonify({"error": "messages 必须是数组或字符串"}), 400
+
+    try:
+        result = analyze.update_portrait(portrait, messages)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)[:300]}), 500
+    except Exception as e:
+        return jsonify({"error": f"更新失败: {e}"}), 500
+    return jsonify(result)
+
+
 # ========== 辅助 ==========
 def find_shots_root(shots_dir):
     """zip 解压后可能含子目录, 找到 -N.png 最多的目录作为截图根。返回 Path 或 None。"""
