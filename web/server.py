@@ -18,6 +18,9 @@ import analyze  # 复用 analyze.py 的 group_friends/analyze_one/run_analysis �
 
 from flask import Flask, request, jsonify, send_file, render_template, abort
 from flasgger import Swagger
+import logging
+# 关掉 werkzeug 默认的请求行(避免和 JSON 日志重复), 保留启动告警
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # ========== 配置 ==========
 HERE = Path(__file__).resolve().parent
@@ -70,6 +73,72 @@ Swagger(app, template={
 def _docs_redirect():
     from flask import redirect
     return redirect("/apidocs")
+
+# ========== 日志 ==========
+_LOG_LOCK = threading.Lock()
+NOISE_PATHS = ("/apidocs", "/docs", "/flasgger_static", "/apispec_1.json", "/apispec.json")
+_REQ_CTX = threading.local()
+
+def log_event(event, **fields):
+    """统一 stdout JSON 日志, 一行一条, 方便 grep/重定向。"""
+    line = json.dumps({
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "event": event,
+        **fields,
+    }, ensure_ascii=False)
+    with _LOG_LOCK:
+        print(line, flush=True)
+
+@app.before_request
+def _hook_before():
+    _REQ_CTX.start = time.time()
+    _REQ_CTX.ip = request.remote_addr or ""
+
+@app.after_request
+def _hook_after(resp):
+    try:
+        path = request.path
+        if any(path == p or path.startswith(p) for p in NOISE_PATHS):
+            return resp
+        dur = time.time() - getattr(_REQ_CTX, "start", time.time())
+        summary = _summarize_request(path)
+        log_event("request",
+                  method=request.method, path=path, status=resp.status_code,
+                  dur_s=round(dur, 2), ip=getattr(_REQ_CTX, "ip", ""),
+                  **summary)
+    except Exception as e:
+        log_event("log_error", error=str(e))
+    return resp
+
+def _summarize_request(path):
+    """各路由入参摘要(只取关键, 不打全量避免日志爆炸)。"""
+    try:
+        if path == "/analyze_one":
+            if request.is_json:
+                d = request.get_json(silent=True) or {}
+                intro = (d.get("intro") or "")
+                urls = d.get("oss_urls") or []
+            else:
+                intro = request.form.get("intro", "")
+                urls = request.form.getlist("oss_urls")
+            return {"intro_preview": intro[:60], "intro_len": len(intro),
+                    "oss_urls_n": len(urls)}
+        if path == "/update_portrait":
+            d = request.get_json(silent=True) or {}
+            portrait = d.get("portrait") or {}
+            msgs = d.get("messages")
+            return {"portrait_keys": list(portrait.keys()) if isinstance(portrait, dict) else None,
+                    "messages_n": len(msgs) if isinstance(msgs, list)
+                                  else ("str" if isinstance(msgs, str) else None)}
+        if path == "/upload":
+            f = request.files.get("file") if "file" in request.files else None
+            return {"filename": (f.filename if f else None),
+                    "size": request.content_length}
+        if path.startswith(("/progress/", "/download/", "/cancel/")):
+            return {"task_id": path.rsplit("/", 1)[-1]}
+    except Exception:
+        pass
+    return {}
 
 # ========== 任务状态 ==========
 _TASKS_LOCK = threading.Lock()
@@ -336,6 +405,7 @@ def upload():
     th = threading.Thread(target=run_task, args=(task_id, str(real_shots), str(out_xlsx), str(out_json)), daemon=True)
     th.start()
 
+    log_event("upload_accepted", task_id=task_id, total=total, filename=f.filename)
     return jsonify({"task_id": task_id, "total": total})
 
 
@@ -408,6 +478,7 @@ def download(task_id):
     xlsx = t.get("xlsx")
     if not xlsx or not Path(xlsx).exists():
         return jsonify({"error": "Excel 尚未生成或任务未完成"}), 404
+    log_event("download", task_id=task_id)
     return send_file(xlsx, as_attachment=True, download_name=EXCEL_NAME)
 
 
@@ -436,6 +507,7 @@ def cancel(task_id):
     if not t:
         return jsonify({"error": "任务不存在"}), 404
     t["cancel"] = True
+    log_event("cancel", task_id=task_id)
     return jsonify({"ok": True, "message": "已请求取消, 正在等待当前好友处理完"})
 
 
@@ -527,11 +599,20 @@ def analyze_one_route():
         try:
             result = analyze.analyze_single(intro, image_paths)
         except RuntimeError as e:
+            log_event("analyze_one_fail", intro_len=len(intro),
+                      oss_urls_n=len(image_paths), error=str(e)[:200])
             return jsonify({"error": str(e)[:300]}), 500
         except Exception as e:
+            log_event("analyze_one_fail", intro_len=len(intro),
+                      oss_urls_n=len(image_paths), error=str(e)[:200])
             return jsonify({"error": f"分析失败: {e}"}), 500
         # 模型输出的中文 key 统一转英文, 仅保留映射内的字段
         out = {en: result.get(cn) for cn, en in ANALYZE_ONE_FIELD_MAP.items()}
+        log_event("analyze_one_done", intro_len=len(intro),
+                  oss_urls_n=len(image_paths),
+                  occupation=out.get("occupation"), gender=out.get("gender"),
+                  age_range=out.get("age_range"),
+                  tags_n=len(out.get("tags") or []))
         return jsonify(out)
     finally:
         if tmp_dir:
@@ -618,9 +699,27 @@ def update_portrait_route():
     try:
         result = analyze.update_portrait(portrait, messages)
     except RuntimeError as e:
+        log_event("update_portrait_fail",
+                  portrait_keys=list(portrait.keys()),
+                  messages_n=(len(messages) if isinstance(messages, list) else "str"),
+                  error=str(e)[:200])
         return jsonify({"error": str(e)[:300]}), 500
     except Exception as e:
+        log_event("update_portrait_fail",
+                  portrait_keys=list(portrait.keys()),
+                  messages_n=(len(messages) if isinstance(messages, list) else "str"),
+                  error=str(e)[:200])
         return jsonify({"error": f"更新失败: {e}"}), 500
+    # 算哪些字段变了 (input portrait vs model result)
+    try:
+        changed_keys = [k for k in set(portrait) | set(result)
+                        if portrait.get(k) != result.get(k)]
+    except Exception:
+        changed_keys = []
+    log_event("update_portrait_done",
+              portrait_keys=list(portrait.keys()),
+              messages_n=(len(messages) if isinstance(messages, list) else "str"),
+              changed_keys=changed_keys)
     return jsonify(result)
 
 
