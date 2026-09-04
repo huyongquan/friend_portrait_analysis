@@ -93,6 +93,15 @@ def log_event(event, **fields):
 def _hook_before():
     _REQ_CTX.start = time.time()
     _REQ_CTX.ip = request.remote_addr or ""
+    try:
+        path = request.path
+        if any(path == p or path.startswith(p) for p in NOISE_PATHS):
+            return
+        summary = _summarize_request(path)
+        log_event("request_in", method=request.method, path=path,
+                  ip=_REQ_CTX.ip, **summary)
+    except Exception as e:
+        log_event("log_error", error=str(e))
 
 @app.after_request
 def _hook_after(resp):
@@ -101,11 +110,9 @@ def _hook_after(resp):
         if any(path == p or path.startswith(p) for p in NOISE_PATHS):
             return resp
         dur = time.time() - getattr(_REQ_CTX, "start", time.time())
-        summary = _summarize_request(path)
-        log_event("request",
+        log_event("request_out",
                   method=request.method, path=path, status=resp.status_code,
-                  dur_s=round(dur, 2), ip=getattr(_REQ_CTX, "ip", ""),
-                  **summary)
+                  dur_s=round(dur, 2), ip=getattr(_REQ_CTX, "ip", ""))
     except Exception as e:
         log_event("log_error", error=str(e))
     return resp
