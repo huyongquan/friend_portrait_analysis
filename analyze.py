@@ -143,7 +143,7 @@ def group_friends(screenshot_dir):
 
 
 # ========== qwen 调用 (参考 match_materials.py:234 _qwen_post_text) ==========
-def _qwen_post_text(payload, timeout=200):
+def _qwen_post_text(payload, timeout=300):
     """发 qwen messages payload, 带 thinking 兜底重试(最多5次), 返回 text。"""
     headers = {
         "x-api-key": API_KEY,
