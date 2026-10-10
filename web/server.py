@@ -46,9 +46,27 @@ ANALYZE_ONE_FIELD_MAP = {
 }
 
 # OSS URL 域名白名单(逗号分隔, 可经环境变量 OSS_DOMAIN_WHITELIST 覆盖)
-_default_oss = "https://avatar-video.oss-cn-shenzhen.aliyuncs.com/"
+# 另: avatar-video bucket 的任意 OSS 端点(oss-cn-shenzhen / oss-accelerate / internal 等)自动放行
+_default_oss = "https://avatar-video.oss-cn-shenzhen.aliyuncs.com/,https://avatar-video.oss-accelerate.aliyuncs.com/"
 OSS_DOMAIN_WHITELIST = [d.strip() for d in os.environ.get("OSS_DOMAIN_WHITELIST", _default_oss).split(",") if d.strip()]
 MAX_IMAGE_BYTES = 20 * 1024 * 1024   # 单张截图上限 20MB
+
+import re as _re
+from urllib.parse import urlparse as _urlparse
+# avatar-video bucket 的任意区域/加速/内网端点, 如 avatar-video.oss-cn-shenzhen.aliyuncs.com
+_AVATAR_OSS_HOST = _re.compile(r"^avatar-video\.oss-[a-z0-9-]+\.aliyuncs\.com$")
+
+def _oss_url_allowed(url):
+    """白名单前缀命中, 或 host 是 avatar-video bucket 的 OSS 端点。"""
+    if any(url.startswith(p) for p in OSS_DOMAIN_WHITELIST):
+        return True
+    try:
+        u = _urlparse(url)
+    except Exception:
+        return False
+    if u.scheme != "https":
+        return False
+    return bool(_AVATAR_OSS_HOST.match(u.hostname or ""))
 
 # API key 优先环境变量, 缺省回退 analyze.py 硬编码(开发期)
 if os.environ.get("ANALYZE_API_KEY"):
@@ -529,8 +547,8 @@ def analyze_one_route():
       - JSON body: `{"intro": "...", "oss_urls": ["url1", "url2"]}` (Content-Type: application/json)
       - multipart form: intro 字段 + 重复的 oss_urls 字段
 
-      截图 URL 必须命中 OSS 域名白名单(默认 `avatar-video.oss-cn-shenzhen.aliyuncs.com`,
-      可经环境变量 OSS_DOMAIN_WHITELIST 逗号分隔覆盖), 单张上限 20MB。
+      截图 URL 必须命中 OSS 域名白名单(默认 `avatar-video` bucket 的 OSS 端点,
+      含 oss-cn-shenzhen / oss-accelerate 等; 可经环境变量 OSS_DOMAIN_WHITELIST 逗号分隔覆盖), 单张上限 20MB。
       **intro 与 oss_urls 不能同时为空**, 否则返回 400。
       图片临时落盘、请求结束后清理。耗时约 20-40 秒。
     consumes: [application/json]
@@ -589,7 +607,7 @@ def analyze_one_route():
         if oss_urls:
             tmp_dir = Path(tempfile.mkdtemp(prefix="analyze_one_"))
             for i, url in enumerate(oss_urls):
-                if not any(url.startswith(p) for p in OSS_DOMAIN_WHITELIST):
+                if not _oss_url_allowed(url):
                     return jsonify({"error": f"oss_url 域名不合法: {url}"}), 400
                 try:
                     resp = requests.get(url, timeout=(10, 120), stream=True)
